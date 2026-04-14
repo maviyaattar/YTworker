@@ -47,6 +47,13 @@ async function downloadFile(url, destPath) {
   });
 }
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const GROQ_MODEL            = 'llama-3.1-8b-instant';
+const GROQ_API_TIMEOUT_MS   = 30000;
+const BACKEND_API_TIMEOUT_MS = 15000;
+const YOUTUBE_CATEGORY_PEOPLE_AND_BLOGS = '22';
+
 // ─── Quote Generation ────────────────────────────────────────────────────────
 
 const PROMPT_MAP = {
@@ -64,7 +71,7 @@ async function generateQuote(contentType) {
   const res = await axios.post(
     'https://api.groq.com/openai/v1/chat/completions',
     {
-      model: 'llama-3.1-8b-instant',
+      model: GROQ_MODEL,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.8,
       max_tokens: 150,
@@ -74,7 +81,7 @@ async function generateQuote(contentType) {
         Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      timeout: 30000,
+      timeout: GROQ_API_TIMEOUT_MS,
     }
   );
 
@@ -130,14 +137,14 @@ async function generateBackground(bgType, tmpDir) {
 async function renderTextOnImage(bgPath, quote, tmpDir) {
   const outputPath = path.join(tmpDir, 'overlay.jpg');
 
-  // Escape the quote for shell safety: replace backslash, double-quote, and
-  // any characters that could affect the ImageMagick -annotate argument.
-  // We wrap in double-quotes but escape internal double-quotes and backslashes.
-  const safeQuote = quote
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, ' ');
+  // `spawn` passes arguments directly to the process without a shell interpreter,
+  // so no shell escaping is required.  We only need to normalize whitespace
+  // so the entire quote appears on a single text annotation call.
+  const normalizedQuote = quote.replace(/\r?\n/g, ' ').trim();
 
+  // Prefer DejaVu-Sans-Bold which is available on Ubuntu via the fonts-dejavu
+  // package (installed alongside ImageMagick by the workflow).  If the font is
+  // not found, ImageMagick falls back to its built-in default font.
   const args = [
     bgPath,
     '-gravity',    'Center',
@@ -147,7 +154,7 @@ async function renderTextOnImage(bgPath, quote, tmpDir) {
     '-stroke',     'black',
     '-strokewidth','2',
     '-annotate',   '0',
-    safeQuote,
+    normalizedQuote,
     outputPath,
   ];
 
@@ -295,7 +302,7 @@ async function uploadToYouTube(videoPath, quote, contentType, youtubeTokens) {
         title:       title,
         description: description.substring(0, 5000), // YouTube description limit
         tags:        ['Shorts', contentType, 'YouTubeShorts'],
-        categoryId:  '22', // People & Blogs
+        categoryId:  YOUTUBE_CATEGORY_PEOPLE_AND_BLOGS,
       },
       status: {
         privacyStatus:           'public',
@@ -383,7 +390,7 @@ async function runWorker() {
   console.log(`\nFetching users from ${process.env.BACKEND_URL}/worker/users ...`);
   const res = await axios.get(`${process.env.BACKEND_URL}/worker/users`, {
     headers: { Authorization: `Bearer ${process.env.WORKER_SECRET}` },
-    timeout: 15000,
+    timeout: BACKEND_API_TIMEOUT_MS,
   });
 
   const users = res.data.users;
@@ -405,10 +412,9 @@ async function runWorker() {
       failCount++;
       console.error(`[user:${user.email}] ❌ Pipeline failed: ${err.message}`);
       if (err.response) {
-        // Axios error — log response details
-        console.error(
-          `  HTTP ${err.response.status}: ${JSON.stringify(err.response.data)}`
-        );
+        // Log only the HTTP status code — avoid logging response bodies which
+        // may contain sensitive data (tokens, keys, user info).
+        console.error(`  HTTP ${err.response.status} from ${err.config?.url || 'unknown URL'}`);
       }
     }
   }
