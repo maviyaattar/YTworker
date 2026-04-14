@@ -2,7 +2,6 @@ name: YouTube Shorts Worker
 
 on:
   schedule:
-    # Run every 3 hours
     - cron: '0 */3 * * *'
   workflow_dispatch:
 
@@ -10,8 +9,6 @@ jobs:
   run-worker:
     name: Generate & Upload YouTube Shorts
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
 
     env:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -29,7 +26,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
       - name: Install ImageMagick
         run: |
