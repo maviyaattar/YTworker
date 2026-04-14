@@ -10,6 +10,8 @@ jobs:
   run-worker:
     name: Generate & Upload YouTube Shorts
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     env:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}

@@ -106,21 +106,26 @@ async function generateBackground(bgType, tmpDir) {
 
 // ---------------------------------------------------------------------------
 // 3. Render quote text onto background using ImageMagick
+//    The quote is written to a text file and passed via @path to avoid any
+//    shell-injection or special-character issues with the ImageMagick CLI.
 // ---------------------------------------------------------------------------
 async function renderTextOnImage(bgPath, quote, tmpDir) {
   const outputPath = path.join(tmpDir, 'overlay.png');
+  const textFilePath = path.join(tmpDir, 'quote.txt');
 
-  // Sanitise the quote so it is safe to pass as an ImageMagick label
-  const safeQuote = quote.replace(/'/g, '\u2019').replace(/\n/g, ' ');
+  // Write the raw quote to a temp file; ImageMagick reads it with caption:@file
+  await fs.writeFile(textFilePath, quote, 'utf8');
 
   await run('convert', [
+    '-size', '1000x1800',
+    `caption:@${textFilePath}`,
     bgPath,
+    '+swap',
     '-gravity', 'Center',
+    '-composite',
     '-fill', 'white',
     '-pointsize', '72',
     '-font', 'DejaVu-Sans-Bold',
-    '-annotate', '0',
-    safeQuote,
     outputPath,
   ]);
 
@@ -262,7 +267,9 @@ async function processUser(user, tmpDir) {
 
     // 7. Upload to YouTube
     console.log('  [7/7] Uploading to YouTube…');
-    const videoTitle = `${quote.slice(0, 80)} #Shorts`;
+    // Truncate at a word boundary so the title remains readable
+    let shortQuote = quote.length <= 80 ? quote : quote.slice(0, 80).replace(/\s+\S*$/, '');
+    const videoTitle = `${shortQuote} #Shorts`;
     const ytResult = await uploadToYouTube(videoPath, videoTitle, youtubeTokens);
     console.log(`  [youtube] Uploaded! Video ID: ${ytResult.id}`);
   } finally {
@@ -297,14 +304,15 @@ async function runWorker() {
   const tmpDir = path.join(os.tmpdir(), `ytworker_${Date.now()}`);
   await fs.ensureDir(tmpDir);
 
-  // Register cleanup on exit
+  // Register cleanup on exit — use synchronous removal on 'exit' since async
+  // callbacks are not awaited there; signal handlers use async cleanup.
   const cleanup = async () => {
     await fs.remove(tmpDir).catch(() => {});
     console.log('[cleanup] Removed shared temp dir');
   };
-  process.on('exit', () => fs.removeSync(tmpDir));
-  process.on('SIGINT', async () => { await cleanup(); process.exit(0); });
-  process.on('SIGTERM', async () => { await cleanup(); process.exit(0); });
+  process.on('exit', () => { try { fs.removeSync(tmpDir); } catch (_) {} });
+  process.on('SIGINT', () => { cleanup().finally(() => process.exit(0)); });
+  process.on('SIGTERM', () => { cleanup().finally(() => process.exit(0)); });
 
   try {
     // Fetch users from backend
