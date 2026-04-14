@@ -165,7 +165,7 @@ async function generateShortVideo(overlayPublicId) {
         crop: 'fill',
         start_offset: Math.floor(Math.random() * 5),
         duration: VIDEO_SECONDS,
-        overlay: overlayPublicId,
+        overlay: overlayPublicId.replace(/\//g, ':'),
       },
       {
         flags: 'layer_apply',
