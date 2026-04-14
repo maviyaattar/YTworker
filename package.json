@@ -1,0 +1,21 @@
+{
+  "name": "ytworker",
+  "version": "1.0.0",
+  "description": "GitHub Actions worker that automatically generates and uploads YouTube Shorts",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "worker": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "cloudinary": "^2.3.0",
+    "fs-extra": "^11.2.0",
+    "googleapis": "^140.0.1"
+  },
+  "license": "MIT"
+}
