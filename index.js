@@ -94,9 +94,9 @@ async function generateBackground(bgType, tmpDir) {
   const color = BG_COLOR_MAP[bgType] || BG_COLOR_MAP.dark;
   const bgPath = path.join(tmpDir, 'background.png');
 
-  // Create a solid-color 1080×1920 background with ImageMagick
+  // Create a solid-color 1280×720 background with ImageMagick
   await run('convert', [
-    '-size', '1080x1920',
+    '-size', '1280x720',
     `xc:#${color}`,
     bgPath,
   ]);
@@ -149,23 +149,33 @@ async function uploadToCloudinary(filePath, publicId) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Generate final 9:16 short video using Cloudinary video transformations
+// 5. Generate final 16:9 short video using Cloudinary video transformations
 // ---------------------------------------------------------------------------
+const BASE_PUBLIC_ID = 'ai-reel-bot/base_template_v4';
+
 async function generateShortVideo(overlayPublicId) {
-  // Build a video URL using Cloudinary transformations:
-  // - Use a base video or create one from an image with duration
-  // - Overlay the text image
-  // - Crop to 9:16 (1080×1920)
-  // We create a 10-second video from the overlay image via Cloudinary's
-  // image-to-video feature (dl_video) combined with the video transformation.
-  const videoUrl = cloudinary.url(overlayPublicId, {
+  const VIDEO_SECONDS = 10 + Math.floor(Math.random() * 6);
+
+  const videoUrl = cloudinary.url(BASE_PUBLIC_ID, {
     resource_type: 'video',
     transformation: [
-      { width: 1080, height: 1920, crop: 'fill', gravity: 'center' },
-      { duration: '10', effect: 'loop' },
-      { quality: 'auto', fetch_format: 'mp4' },
+      {
+        width: 1280,
+        height: 720,
+        crop: 'fill',
+        start_offset: Math.floor(Math.random() * 5),
+        duration: VIDEO_SECONDS,
+        overlay: overlayPublicId,
+      },
+      {
+        flags: 'layer_apply',
+        gravity: 'center',
+      },
+      {
+        quality: 'auto:best',
+        fetch_format: 'mp4',
+      },
     ],
-    format: 'mp4',
   });
 
   return videoUrl;
@@ -175,9 +185,22 @@ async function generateShortVideo(overlayPublicId) {
 // 6. Download the generated video from Cloudinary
 // ---------------------------------------------------------------------------
 async function downloadVideo(videoUrl, tmpDir) {
+  if (!videoUrl) throw new Error('videoUrl is empty – cannot download');
   const videoPath = path.join(tmpDir, 'short.mp4');
   console.log('  [video] Downloading from Cloudinary…');
-  await downloadFile(videoUrl, videoPath);
+  const response = await axios.get(videoUrl, {
+    responseType: 'stream',
+    validateStatus: () => true,
+  });
+  if (response.status !== 200) {
+    throw new Error(`Download failed with status ${response.status}: ${videoUrl}`);
+  }
+  const writer = fs.createWriteStream(videoPath);
+  await new Promise((resolve, reject) => {
+    response.data.pipe(writer);
+    writer.on('finish', resolve);
+    writer.on('error', reject);
+  });
   return videoPath;
 }
 
