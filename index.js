@@ -35,19 +35,6 @@ function run(cmd, args) {
 }
 
 // ---------------------------------------------------------------------------
-// Helper – download a URL to a local file path
-// ---------------------------------------------------------------------------
-async function downloadFile(url, dest) {
-  const response = await axios.get(url, { responseType: 'stream' });
-  const writer = fs.createWriteStream(dest);
-  await new Promise((resolve, reject) => {
-    response.data.pipe(writer);
-    writer.on('finish', resolve);
-    writer.on('error', reject);
-  });
-}
-
-// ---------------------------------------------------------------------------
 // 1. Generate quote via Groq Chat Completions
 // ---------------------------------------------------------------------------
 const PROMPT_MAP = {
@@ -72,60 +59,52 @@ async function generateQuote(contentType) {
         'Content-Type': 'application/json',
       },
       timeout: 30000,
-    },
+    }
   );
   return res.data.choices[0].message.content.trim();
 }
 
 // ---------------------------------------------------------------------------
-// 2. Generate background image
-//    Uses a Cloudinary placeholder URL keyed on bgType so the worker does not
-//    need a local image file.  You can swap this for any image generation API.
+// 2. Generate background image (solid color using ImageMagick)
 // ---------------------------------------------------------------------------
 const BG_COLOR_MAP = {
   paper: 'f5f0e8',
   dark: '1a1a2e',
-  nature: '2d6a4f',
-  ocean: '023e8a',
-  sunset: 'ff6b35',
+  light: 'ffffff',
 };
 
 async function generateBackground(bgType, tmpDir) {
   const color = BG_COLOR_MAP[bgType] || BG_COLOR_MAP.dark;
   const bgPath = path.join(tmpDir, 'background.png');
 
-  // Create a solid-color 1280×720 background with ImageMagick
-  await run('convert', [
-    '-size', '1280x720',
-    `xc:#${color}`,
-    bgPath,
-  ]);
-
+  await run('convert', ['-size', '1080x1920', `xc:#${color}`, bgPath]);
   return bgPath;
 }
 
 // ---------------------------------------------------------------------------
 // 3. Render quote text onto background using ImageMagick
-//    The quote is written to a text file and passed via @path to avoid any
-//    shell-injection or special-character issues with the ImageMagick CLI.
 // ---------------------------------------------------------------------------
 async function renderTextOnImage(bgPath, quote, tmpDir) {
   const outputPath = path.join(tmpDir, 'overlay.png');
   const textFilePath = path.join(tmpDir, 'quote.txt');
 
-  // Write the raw quote to a temp file; ImageMagick reads it with caption:@file
   await fs.writeFile(textFilePath, quote, 'utf8');
 
   await run('convert', [
-    '-size', '1000x1800',
-    `caption:@${textFilePath}`,
     bgPath,
-    '+swap',
-    '-gravity', 'Center',
-    '-composite',
-    '-fill', 'white',
-    '-pointsize', '72',
-    '-font', 'DejaVu-Sans-Bold',
+    '-gravity',
+    'Center',
+    '-fill',
+    'white',
+    '-font',
+    'DejaVu-Sans-Bold',
+    '-pointsize',
+    '64',
+    '-interline-spacing',
+    '10',
+    '-annotate',
+    '+0+0',
+    `@${textFilePath}`,
     outputPath,
   ]);
 
@@ -136,45 +115,34 @@ async function renderTextOnImage(bgPath, quote, tmpDir) {
 // 4. Upload overlay image to Cloudinary
 // ---------------------------------------------------------------------------
 async function uploadToCloudinary(filePath, publicId) {
-  return new Promise((resolve, reject) => {
-    cloudinary.uploader.upload(
-      filePath,
-      { public_id: publicId, resource_type: 'image', overwrite: true },
-      (err, result) => {
-        if (err) reject(err);
-        else resolve(result);
-      },
-    );
+  const result = await cloudinary.uploader.upload(filePath, {
+    public_id: publicId,
+    resource_type: 'image',
+    overwrite: true,
   });
+  return result;
 }
 
 // ---------------------------------------------------------------------------
-// 5. Generate final 16:9 short video using Cloudinary video transformations
+// 5. Generate final short video URL using Cloudinary transformations
 // ---------------------------------------------------------------------------
 const BASE_PUBLIC_ID = 'ai-reel-bot/base_template_v4';
 
 async function generateShortVideo(overlayPublicId) {
-  const VIDEO_SECONDS = 10 + Math.floor(Math.random() * 6);
+  const VIDEO_SECONDS = 12;
 
   const videoUrl = cloudinary.url(BASE_PUBLIC_ID, {
     resource_type: 'video',
     transformation: [
       {
-        width: 1280,
-        height: 720,
+        width: 1080,
+        height: 1920,
         crop: 'fill',
-        start_offset: Math.floor(Math.random() * 5),
         duration: VIDEO_SECONDS,
         overlay: overlayPublicId.replace(/\//g, ':'),
       },
-      {
-        flags: 'layer_apply',
-        gravity: 'center',
-      },
-      {
-        quality: 'auto:best',
-        fetch_format: 'mp4',
-      },
+      { flags: 'layer_apply', gravity: 'center' },
+      { quality: 'auto:best', fetch_format: 'mp4' },
     ],
   });
 
@@ -182,45 +150,51 @@ async function generateShortVideo(overlayPublicId) {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Download the generated video from Cloudinary
+// 6. Download video
 // ---------------------------------------------------------------------------
 async function downloadVideo(videoUrl, tmpDir) {
   if (!videoUrl) throw new Error('videoUrl is empty – cannot download');
+
   const videoPath = path.join(tmpDir, 'short.mp4');
   console.log('  [video] Downloading from Cloudinary…');
+
   const response = await axios.get(videoUrl, {
     responseType: 'stream',
     validateStatus: () => true,
   });
+
   if (response.status !== 200) {
     throw new Error(`Download failed with status ${response.status}: ${videoUrl}`);
   }
+
   const writer = fs.createWriteStream(videoPath);
   await new Promise((resolve, reject) => {
     response.data.pipe(writer);
     writer.on('finish', resolve);
     writer.on('error', reject);
   });
+
   return videoPath;
 }
 
 // ---------------------------------------------------------------------------
-// 7. Upload video to YouTube using googleapis
+// 7. Upload video to YouTube (✅ FIXED TOKEN MAPPING)
 // ---------------------------------------------------------------------------
 async function uploadToYouTube(videoPath, title, youtubeTokens) {
-  const { clientId, clientSecret, refreshToken, accessToken } = youtubeTokens;
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+
+  const refreshToken = youtubeTokens?.refresh_token;
+  const accessToken = youtubeTokens?.access_token;
 
   const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
 
   if (refreshToken) {
     oauth2Client.setCredentials({ refresh_token: refreshToken });
-    // Force refresh to get a fresh access token
-    const tokenResponse = await oauth2Client.refreshAccessToken();
-    oauth2Client.setCredentials(tokenResponse.credentials);
   } else if (accessToken) {
     oauth2Client.setCredentials({ access_token: accessToken });
   } else {
-    throw new Error('No valid YouTube credentials (need refreshToken or accessToken)');
+    throw new Error('No valid YouTube credentials');
   }
 
   const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
@@ -231,14 +205,12 @@ async function uploadToYouTube(videoPath, title, youtubeTokens) {
       snippet: {
         title,
         description: 'Auto-generated YouTube Short',
-        tags: ['Shorts', 'AI', 'motivation'],
+        tags: ['Shorts', 'AI', 'automation'],
         categoryId: '22',
-        defaultLanguage: 'en',
       },
       status: {
         privacyStatus: 'public',
         selfDeclaredMadeForKids: false,
-        madeForKids: false,
       },
     },
     media: {
@@ -254,6 +226,7 @@ async function uploadToYouTube(videoPath, title, youtubeTokens) {
 // ---------------------------------------------------------------------------
 async function processUser(user, tmpDir) {
   const { email, contentType = 'motivation', bgType = 'dark', youtubeTokens } = user;
+
   const jobId = uuidv4();
   const userTmpDir = path.join(tmpDir, jobId);
   await fs.ensureDir(userTmpDir);
@@ -261,42 +234,33 @@ async function processUser(user, tmpDir) {
   try {
     console.log(`\n[user] Processing: ${email} (contentType=${contentType}, bgType=${bgType})`);
 
-    // 1. Generate quote
     console.log('  [1/7] Generating quote…');
     const quote = await generateQuote(contentType);
     console.log(`  [quote] "${quote}"`);
 
-    // 2. Generate background
     console.log('  [2/7] Generating background…');
     const bgPath = await generateBackground(bgType, userTmpDir);
 
-    // 3. Render text on image
     console.log('  [3/7] Rendering text on image…');
     const overlayPath = await renderTextOnImage(bgPath, quote, userTmpDir);
 
-    // 4. Upload overlay to Cloudinary
     const overlayPublicId = `ytworker/overlay_${jobId}`;
     console.log(`  [4/7] Uploading overlay to Cloudinary (${overlayPublicId})…`);
     await uploadToCloudinary(overlayPath, overlayPublicId);
 
-    // 5. Generate short video URL via Cloudinary transformations
     console.log('  [5/7] Generating video via Cloudinary…');
     const videoUrl = await generateShortVideo(overlayPublicId);
     console.log(`  [video url] ${videoUrl}`);
 
-    // 6. Download video
     console.log('  [6/7] Downloading video…');
     const videoPath = await downloadVideo(videoUrl, userTmpDir);
 
-    // 7. Upload to YouTube
     console.log('  [7/7] Uploading to YouTube…');
-    // Truncate at a word boundary so the title remains readable
-    let shortQuote = quote.length <= 80 ? quote : quote.slice(0, 80).replace(/\s+\S*$/, '');
-    const videoTitle = `${shortQuote} #Shorts`;
-    const ytResult = await uploadToYouTube(videoPath, videoTitle, youtubeTokens);
+    const shortTitle = quote.length <= 80 ? quote : quote.slice(0, 80).replace(/\s+\S*$/, '');
+    const ytResult = await uploadToYouTube(videoPath, `${shortTitle} #Shorts`, youtubeTokens);
+
     console.log(`  [youtube] Uploaded! Video ID: ${ytResult.id}`);
   } finally {
-    // Clean up temp files for this user
     await fs.remove(userTmpDir).catch(() => {});
     console.log(`  [cleanup] Removed temp dir for ${email}`);
   }
@@ -308,7 +272,6 @@ async function processUser(user, tmpDir) {
 async function runWorker() {
   console.log('=== YTworker started at', new Date().toISOString(), '===');
 
-  // Validate required env vars
   const required = [
     'GROQ_API_KEY',
     'CLOUDINARY_CLOUD_NAME',
@@ -316,29 +279,38 @@ async function runWorker() {
     'CLOUDINARY_API_SECRET',
     'BACKEND_URL',
     'WORKER_SECRET',
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
   ];
+
   const missing = required.filter((k) => !process.env[k]);
   if (missing.length > 0) {
     console.error('[fatal] Missing required environment variables:', missing.join(', '));
     process.exit(1);
   }
 
-  // Shared temp directory for this run
   const tmpDir = path.join(os.tmpdir(), `ytworker_${Date.now()}`);
   await fs.ensureDir(tmpDir);
 
-  // Register cleanup on exit — use synchronous removal on 'exit' since async
-  // callbacks are not awaited there; signal handlers use async cleanup.
   const cleanup = async () => {
     await fs.remove(tmpDir).catch(() => {});
     console.log('[cleanup] Removed shared temp dir');
   };
-  process.on('exit', () => { try { fs.removeSync(tmpDir); } catch (_) {} });
-  process.on('SIGINT', () => { cleanup().finally(() => process.exit(0)); });
-  process.on('SIGTERM', () => { cleanup().finally(() => process.exit(0)); });
+
+  process.on('exit', () => {
+    try {
+      fs.removeSync(tmpDir);
+    } catch (_) {}
+  });
+
+  process.on('SIGINT', () => {
+    cleanup().finally(() => process.exit(0));
+  });
+  process.on('SIGTERM', () => {
+    cleanup().finally(() => process.exit(0));
+  });
 
   try {
-    // Fetch users from backend
     console.log(`[worker] Fetching users from ${process.env.BACKEND_URL}/worker/users`);
     const usersRes = await axios.get(`${process.env.BACKEND_URL}/worker/users`, {
       headers: { Authorization: `Bearer ${process.env.WORKER_SECRET}` },
@@ -353,7 +325,6 @@ async function runWorker() {
 
     console.log(`[worker] Found ${users.length} user(s) to process`);
 
-    // Process each user sequentially; errors are caught per-user
     for (const user of users) {
       try {
         await processUser(user, tmpDir);
