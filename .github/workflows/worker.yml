@@ -18,6 +18,10 @@ jobs:
       BACKEND_URL: ${{ secrets.BACKEND_URL }}
       WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
 
+      # ✅ ADD THESE TWO:
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
