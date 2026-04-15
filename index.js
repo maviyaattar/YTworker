@@ -35,22 +35,41 @@ function run(cmd, args) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Generate quote via Groq Chat Completions
+// 1. Generate quote via Groq Chat Completions (MAX 10 WORDS)
 // ---------------------------------------------------------------------------
 const PROMPT_MAP = {
-  islamic: 'Write a short Islamic reminder (1-2 sentences). Output only the reminder text.',
-  motivation: 'Write a short motivational quote (1-2 sentences). Output only the quote.',
-  success: 'Write a short success-mindset quote (1-2 sentences). Output only the quote.',
+  islamic:
+    'Write ONE Islamic reminder, maximum 10 words. Output ONLY the text. No emojis. No quotes. No references.',
+  motivation:
+    'Write ONE motivational quote, maximum 10 words. Output ONLY the text. No emojis. No quotes.',
+  success:
+    'Write ONE success mindset quote, maximum 10 words. Output ONLY the text. No emojis. No quotes.',
 };
+
+function normalizeQuote(raw) {
+  let q = String(raw || '')
+    .replace(/^"+|"+$/g, '') // remove surrounding quotes
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // hard limit: 10 words
+  const words = q.split(' ').filter(Boolean);
+  if (words.length > 10) q = words.slice(0, 10).join(' ');
+  return q;
+}
 
 async function generateQuote(contentType) {
   const prompt = PROMPT_MAP[contentType] || PROMPT_MAP.motivation;
+
   const res = await axios.post(
     'https://api.groq.com/openai/v1/chat/completions',
     {
       model: 'llama-3.1-8b-instant',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 120,
+      messages: [
+        { role: 'system', content: 'You output only the final text. No extra formatting.' },
+        { role: 'user', content: prompt },
+      ],
+      max_tokens: 40,
       temperature: 0.8,
     },
     {
@@ -61,7 +80,11 @@ async function generateQuote(contentType) {
       timeout: 30000,
     }
   );
-  return res.data.choices[0].message.content.trim();
+
+  const raw = res?.data?.choices?.[0]?.message?.content;
+  const quote = normalizeQuote(raw);
+  if (!quote) throw new Error('Groq returned empty quote');
+  return quote;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,35 +99,60 @@ const BG_COLOR_MAP = {
 async function generateBackground(bgType, tmpDir) {
   const color = BG_COLOR_MAP[bgType] || BG_COLOR_MAP.dark;
   const bgPath = path.join(tmpDir, 'background.png');
-
   await run('convert', ['-size', '1080x1920', `xc:#${color}`, bgPath]);
   return bgPath;
 }
 
 // ---------------------------------------------------------------------------
-// 3. Render quote text onto background using ImageMagick
+// 3. Render quote text onto background (NO @file -> avoids IM security policy)
 // ---------------------------------------------------------------------------
+function wrapLines(text, maxLen = 18, maxLines = 5) {
+  const words = String(text || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  if (words.length === 0) return [''];
+
+  const lines = [];
+  let line = '';
+
+  for (const w of words) {
+    const next = line ? (line + ' ' + w) : w;
+    if (next.length <= maxLen) line = next;
+    else {
+      if (line) lines.push(line);
+      line = w;
+      if (lines.length >= maxLines - 1) break;
+    }
+  }
+
+  if (line && lines.length < maxLines) lines.push(line);
+  return lines;
+}
+
+function escapeForImagemagick(s) {
+  // keep it simple: only escape backslash and double quotes
+  return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 async function renderTextOnImage(bgPath, quote, tmpDir) {
   const outputPath = path.join(tmpDir, 'overlay.png');
-  const textFilePath = path.join(tmpDir, 'quote.txt');
 
-  await fs.writeFile(textFilePath, quote, 'utf8');
+  const lines = wrapLines(quote, 18, 5);
+  const text = escapeForImagemagick(lines.join('\n'));
 
   await run('convert', [
     bgPath,
-    '-gravity',
-    'Center',
-    '-fill',
-    'white',
-    '-font',
-    'DejaVu-Sans-Bold',
-    '-pointsize',
-    '64',
-    '-interline-spacing',
-    '10',
-    '-annotate',
-    '+0+0',
-    `@${textFilePath}`,
+    '-gravity', 'Center',
+    '-font', 'DejaVu-Sans-Bold',
+    '-pointsize', '78',
+    '-interline-spacing', '14',
+
+    // shadow
+    '-fill', 'rgba(0,0,0,0.35)',
+    '-annotate', '+3+3', text,
+
+    // main
+    '-fill', '#111827',
+    '-annotate', '+0+0', text,
+
     outputPath,
   ]);
 
@@ -115,16 +163,15 @@ async function renderTextOnImage(bgPath, quote, tmpDir) {
 // 4. Upload overlay image to Cloudinary
 // ---------------------------------------------------------------------------
 async function uploadToCloudinary(filePath, publicId) {
-  const result = await cloudinary.uploader.upload(filePath, {
+  return cloudinary.uploader.upload(filePath, {
     public_id: publicId,
     resource_type: 'image',
     overwrite: true,
   });
-  return result;
 }
 
 // ---------------------------------------------------------------------------
-// 5. Generate final short video URL using Cloudinary transformations
+// 5. Generate final 9:16 short video URL via Cloudinary transformations
 // ---------------------------------------------------------------------------
 const BASE_PUBLIC_ID = 'ai-reel-bot/base_template_v4';
 
@@ -256,8 +303,8 @@ async function processUser(user, tmpDir) {
     const videoPath = await downloadVideo(videoUrl, userTmpDir);
 
     console.log('  [7/7] Uploading to YouTube…');
-    const shortTitle = quote.length <= 80 ? quote : quote.slice(0, 80).replace(/\s+\S*$/, '');
-    const ytResult = await uploadToYouTube(videoPath, `${shortTitle} #Shorts`, youtubeTokens);
+    const videoTitle = `${quote} #Shorts`; // already <=10 words
+    const ytResult = await uploadToYouTube(videoPath, videoTitle, youtubeTokens);
 
     console.log(`  [youtube] Uploaded! Video ID: ${ytResult.id}`);
   } finally {
@@ -303,12 +350,8 @@ async function runWorker() {
     } catch (_) {}
   });
 
-  process.on('SIGINT', () => {
-    cleanup().finally(() => process.exit(0));
-  });
-  process.on('SIGTERM', () => {
-    cleanup().finally(() => process.exit(0));
-  });
+  process.on('SIGINT', () => cleanup().finally(() => process.exit(0)));
+  process.on('SIGTERM', () => cleanup().finally(() => process.exit(0)));
 
   try {
     console.log(`[worker] Fetching users from ${process.env.BACKEND_URL}/worker/users`);
